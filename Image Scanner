@@ -1,0 +1,128 @@
+import cv2
+import numpy as np
+from imutils.perspective import four_point_transform
+import matplotlib.pyplot as plt
+
+def enhance_receipt_detection(image_path):
+    # Read image
+    img = cv2.imread(image_path)
+    original = img.copy()
+    
+    def resize_image(image, width=500):
+        height = int(image.shape[0] * width / image.shape[1])
+        return cv2.resize(image, (width, height)), (width, height)
+    
+    # Resize for processing
+    resized, dimensions = resize_image(img)
+    
+    # Pre-processing specifically for receipt detection
+    def preprocess_receipt(image):
+        # Convert to grayscale
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # Apply bilateral filter to preserve edges while reducing noise
+        filtered = cv2.bilateralFilter(gray, 9, 75, 75)
+        
+        # Create a mask to focus on lighter regions (receipt is usually light colored)
+        _, mask = cv2.threshold(filtered, 200, 255, cv2.THRESH_BINARY)
+        
+        # Enhance edges
+        edges = cv2.Canny(filtered, 30, 200)
+        
+        # Dilate edges to connect broken lines
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5,5))
+        dilated = cv2.dilate(edges, kernel, iterations=2)
+        
+        return dilated, mask
+    
+    processed, mask = preprocess_receipt(resized)
+    
+    # Find contours with receipt-specific adjustments
+    contours, _ = cv2.findContours(processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # Sort contours by area and filter by aspect ratio (receipts are usually tall and narrow)
+    receipt_candidates = []
+    for contour in sorted(contours, key=cv2.contourArea, reverse=True)[:5]:
+        x, y, w, h = cv2.boundingRect(contour)
+        aspect_ratio = h / w
+        
+        # Typical receipt aspect ratio is between 1.5 and 4
+        if 1.5 <= aspect_ratio <= 4:
+            peri = cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+            
+            if len(approx) >= 4:
+                receipt_candidates.append(approx)
+    
+    if receipt_candidates:
+        # Get the largest candidate that meets our criteria
+        points = np.squeeze(receipt_candidates[0])
+        
+        # If we have more than 4 points, reduce to 4 by finding corners
+        if len(points) > 4:
+            rect = cv2.minAreaRect(points)
+            points = cv2.boxPoints(rect)
+        
+        # Scale points back to original image size
+        scale_x = original.shape[1] / dimensions[0]
+        scale_y = original.shape[0] / dimensions[1]
+        scaled_points = np.float32([[p[0] * scale_x, p[1] * scale_y] for p in points])
+        
+        # Warp perspective to get top-down view
+        warped = four_point_transform(original, scaled_points)
+        
+        # Enhance text clarity
+        def enhance_text(image):
+            # Convert to LAB color space
+            lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            
+            # Apply CLAHE to L channel
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            enhanced_l = clahe.apply(l)
+            
+            # Merge channels back
+            enhanced_lab = cv2.merge([enhanced_l, a, b])
+            enhanced = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+            
+            # Adjust contrast slightly
+            enhanced = cv2.addWeighted(enhanced, 1.2, enhanced, 0, -10)
+            
+            return enhanced
+        
+        final_image = enhance_text(warped)
+        
+        # Display results
+        plt.figure(figsize=(15,10))
+        plt.subplot(2,2,1)
+        plt.imshow(cv2.cvtColor(original, cv2.COLOR_BGR2RGB))
+        plt.title('Original Image')
+        
+        plt.subplot(2,2,2)
+        plt.imshow(processed, cmap='gray')
+        plt.title('Processed Edges')
+        
+        plt.subplot(2,2,3)
+        plt.imshow(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
+        plt.title('Warped Receipt')
+        
+        plt.subplot(2,2,4)
+        plt.imshow(cv2.cvtColor(final_image, cv2.COLOR_BGR2RGB))
+        plt.title('Enhanced Result')
+        
+        plt.show()
+        
+        return final_image
+    
+    return None
+
+# Usage example
+if __name__ == "__main__":
+    image_path = "3.jpg"  # Replace with your receipt image path
+    result = enhance_receipt_detection(image_path)
+    
+    if result is not None:
+        cv2.imwrite("enhanced_receipt.jpg", result)
+        print("Receipt processed successfully!")
+    else:
+        print("No valid receipt found in image")
